@@ -144,48 +144,6 @@ def deriv(in_comp_func, derivative_indice, dx=.001, input_pad_to=4):
         return (recip_dx) * (in_comp_func(event + offset_vector) - in_comp_func(event - offset_vector))
     return comp_func
 
-def grid_deriv(data, grid, deriv_indice, point_indices, data_indices=None, data_is_func=True):
-    #time_mesh = raw_grid[0]
-    #time_mesh = time_mesh[~time_mesh.mask]
-    #grid = [time_mesh, *raw_grid[1:]]
-    
-    #data_is_func distinguishes between using e.g. .christoffel() or .christoffel_grid[]
-    offset_vector = np.zeros_like(point_indices)
-    offset_vector[deriv_indice] = 1
-    len_of_deriv_axis = len(grid[deriv_indice])
-    
-    
-    if point_indices[deriv_indice] >= len_of_deriv_axis-1:
-        right_point_indices = point_indices
-    else:
-        right_point_indices = point_indices + offset_vector
-
-    if point_indices[deriv_indice] == 0:
-        left_point_indices = point_indices
-    else:
-        left_point_indices = point_indices - offset_vector
-    
-    
-    right_point = np.array([grid[i][right_point_indices[i]] for i in range(len(right_point_indices))])
-    left_point = np.array([grid[i][left_point_indices[i]] for i in range(len(left_point_indices))])
-    dx = np.linalg.norm(right_point - left_point)
-
-    if data_indices == None:
-        if data_is_func:
-            right_data = data(right_point_indices)
-            left_data = data(left_point_indices)
-        else:
-            right_data = data[right_point_indices]
-            left_data = data[left_point_indices]
-    else:
-        if data_is_func:
-            right_data = data(data_indices, right_point_indices)
-            left_data = data(data_indices, left_point_indices)
-        else:
-            right_data = data[data_indices][right_point_indices]
-            left_data = data[data_indices][left_point_indices]
-            
-    return (right_data - left_data)/dx
     
 def flat_metric(indices):
     i,j = indices
@@ -196,6 +154,7 @@ def flat_metric(indices):
     else:
         return 1
 
+
 def make_grid(time_window=[0,10], space_1d_window=[-5,5], space_dim=3, dt=.01, dx=.01, meshgrid=False, return_find=True, return_steps=True): #dt, dx are not exactly honored. they are used to calculate num_t, num_x to be fed into np.linspace, which may result in a slightly different step size.
     grid = []
     num_t = math.ceil((time_window[1]-time_window[0])/dt)
@@ -204,6 +163,7 @@ def make_grid(time_window=[0,10], space_1d_window=[-5,5], space_dim=3, dt=.01, d
     time_1d_arr = np.ma.array(time_1d_arr, mask=np.repeat([True], len(time_1d_arr)))
     time_len = len(time_1d_arr)
     space_1d_arr, dx = np.linspace(*space_1d_window, num_x, retstep=True)
+    space_1d_arr = np.ma.array(space_1d_arr, mask=np.repeat([True], len(space_1d_arr)))
     space_len = len(space_1d_arr)
     if meshgrid:
         grid = np.meshgrid(time_1d_arr, *np.tile(space_1d_arr, (space_dim, 1)))
@@ -226,7 +186,7 @@ def make_grid(time_window=[0,10], space_1d_window=[-5,5], space_dim=3, dt=.01, d
             if time >= time_end:
                 time = time_end
             
-            space_indexes = np.empty_like(space_poses, dtype='uint')
+            space_indexes = np.empty_like(space_poses, dtype='int')
             if not one_particle_mode:
                 for i,space_pos in enumerate(space_poses):
                     for j,space_comp in enumerate(space_pos):
@@ -304,7 +264,7 @@ def make_grid(time_window=[0,10], space_1d_window=[-5,5], space_dim=3, dt=.01, d
 
 
 class SpacetimeMesh:
-    def __init__(self, deviation_field, stored_space_dim, coord_grids, find, keep_time_size=3):
+    def __init__(self, deviation_field, stored_space_dim, coord_grids, find, keep_time_size=3, keep_space_size=10):
         '''
         #!!!todo: spaceblocks
         here's the idea: suppose we want discretized spacetime to be (n,m,l) sized. we already have a way of advancing time and forgetting the past to take care of the time dimension (saving memory and time).
@@ -312,6 +272,9 @@ class SpacetimeMesh:
         the idea is to store data on a block of space. if a value is requested outside of the currently loaded block, we (write to disk or throw away) the current block and load in the requested block.
         perhaps have an adjustable number_of_blocks (along with size), or have the size of blocks be computed from the number of blocks. this way the we can tell the mesh how many blocks will be needed by guessing that we will need as many blocks as we have particles with different trajectories.
         '''
+        self.spacetime_dim = len(coord_grids)
+        self.space_dim = self.spacetime_dim - 1
+        
         stored_spacetime_dim = stored_space_dim+1
         self.data_dim = stored_spacetime_dim
         
@@ -319,14 +282,22 @@ class SpacetimeMesh:
         self.keep_time_size = keep_time_size
         coord_grids[0].mask[:keep_time_size] = False
         self.full_time_arr = np.ma.copy(coord_grids[0])
+        
+        self.lowest_kept_space_index = np.repeat([0], self.spacetime_dim-1)
+        self.keep_space_size = keep_space_size
+        self.full_space_arrs = []
+        for i in range(1, self.spacetime_dim):
+            coord_grids[i].mask[:keep_space_size] = False
+            self.full_space_arrs.append(np.ma.copy(coord_grids[i]))
+        
         self.grid = coord_grids
-        self.grid[0] = self.grid[0][~self.grid[0].mask]
+        for i in range(self.spacetime_dim):
+            self.grid[i] = self.grid[i][~self.grid[i].mask]
         self.find_raw = find
         
-        self.grid_dim = len(coord_grids)
         self.sizes = np.zeros(len(coord_grids), dtype='int')
         self.sizes[0] = coord_grids[0].count()
-        self.sizes[1:] = np.array([len(coord_grids[i]) for i in range(1, len(coord_grids))])
+        self.sizes[1:] = np.array([coord_grids[i].count() for i in range(1, len(coord_grids))])
         
         self.deviation_field = deviation_field
         self.deviation_grid = np.ma.masked_all((self.data_dim, self.data_dim, *self.sizes), dtype='float32')
@@ -335,9 +306,24 @@ class SpacetimeMesh:
 
     def find(self, time, space_poses):
         time_index, space_indexes = self.find_raw(time, space_poses)
-        if time_index >= self.keep_time_size + self.lowest_kept_time_index:
+        if time_index >= self.keep_time_size + self.lowest_kept_time_index - 1:
             self.advance()
         time_index -= self.lowest_kept_time_index
+        
+
+        if len(np.shape(space_poses)) != 1 and len(space_poses) == 1:
+            space_indexes = space_indexes[0]
+            
+        if len(np.shape(space_poses)) == 1 or len(space_poses) == 1:
+            if np.any(space_indexes >= self.keep_space_size + self.lowest_kept_space_index-1) or np.any(space_indexes <= self.lowest_kept_space_index):
+                self.shift(space_indexes)
+            space_indexes -= self.lowest_kept_space_index
+        else:
+            raise(NotImplementedError) #!!! haven't implemented multiparticle space blocks.
+            
+        if len(np.shape(space_poses)) != 1 and len(space_poses) == 1:
+            space_indexes = np.array([space_indexes])
+            
         return time_index, space_indexes
     
     def calc_data_on_grid(self, data_func, data_grid_name, data_indices, *args):
@@ -350,14 +336,65 @@ class SpacetimeMesh:
             spacetime_index = args
         
         data_grid = getattr(self, data_grid_name)
+        try:
+            data_grid.mask[(*data_indices, *spacetime_index)]
+        except:
+            print('a')
         if not data_grid.mask[(*data_indices, *spacetime_index)]:
             return data_grid[(*data_indices, *spacetime_index)]
         else:
             data_out = data_func(data_indices, spacetime_index)
+            if data_out > 1e3:
+                print('a')
+                data_func(data_indices, spacetime_index)
             data_grid[(*data_indices, *spacetime_index)] = data_out
             data_grid.mask[(*data_indices, *spacetime_index)] = False
             
         return data_out
+    
+    def grid_deriv(self, data, deriv_indice, point_indices, data_indices=None, data_is_func=True):
+        grid = self.grid
+        #time_mesh = raw_grid[0]
+        #time_mesh = time_mesh[~time_mesh.mask]
+        #grid = [time_mesh, *raw_grid[1:]]
+        
+        #data_is_func distinguishes between using e.g. .christoffel() or .christoffel_grid[]
+        offset_vector = np.zeros_like(point_indices)
+        offset_vector[deriv_indice] = 1
+        len_of_deriv_axis = len(grid[deriv_indice])
+        
+        
+        if point_indices[deriv_indice] >= len_of_deriv_axis-1:
+            right_point_indices = point_indices
+        else:
+            right_point_indices = point_indices + offset_vector
+
+        if point_indices[deriv_indice] == 0:
+            left_point_indices = point_indices
+        else:
+            left_point_indices = point_indices - offset_vector
+        
+        
+        right_point = np.array([grid[i][right_point_indices[i]] for i in range(len(right_point_indices))])
+        left_point = np.array([grid[i][left_point_indices[i]] for i in range(len(left_point_indices))])
+        dx = np.linalg.norm(right_point - left_point)
+
+        if data_indices == None:
+            if data_is_func:
+                right_data = data(right_point_indices)
+                left_data = data(left_point_indices)
+            else:
+                right_data = data[right_point_indices]
+                left_data = data[left_point_indices]
+        else:
+            if data_is_func:
+                right_data = data(data_indices, right_point_indices)
+                left_data = data(data_indices, left_point_indices)
+            else:
+                right_data = data[data_indices][right_point_indices]
+                left_data = data[data_indices][left_point_indices]
+                
+        return (right_data - left_data)/dx
     
     def deviation_data_func(self, deviation_indices, *args):
         if len(args) == 1:
@@ -391,13 +428,16 @@ class SpacetimeMesh:
         
         k,i,j = christoffel_indices
         l=k #as otherwise \eta^{k,l}=0 so the contribution to \Gamma^{k}_{a,b} [in the linear approximation] is 0.
-        diff_1 = grid_deriv(self.deviation, self.grid, i, spacetime_index, data_indices=(j,l))
+        diff_1 = self.grid_deriv(self.deviation, i, spacetime_index, data_indices=(j,l))
         
-        diff_2 = grid_deriv(self.deviation, self.grid, j, spacetime_index, data_indices=(i,l))
+        diff_2 = self.grid_deriv(self.deviation, j, spacetime_index, data_indices=(i,l))
         
-        diff_3 = grid_deriv(self.deviation, self.grid, l, spacetime_index, data_indices=(i,j))
+        diff_3 = self.grid_deriv(self.deviation, l, spacetime_index, data_indices=(i,j))
         
         christoffel_out = .5 * flat_metric((k,l)) * ( diff_1 + diff_2 - diff_3 )
+        if abs(christoffel_out) > 1e3:
+            print(christoffel_out)
+            
         return christoffel_out
     
     def christoffel(self, christoffel_indices, *args):
@@ -410,24 +450,24 @@ class SpacetimeMesh:
         return self.calc_data_on_grid(self.christoffel_data_func, 'christoffel_grid', (k,i,j), *args)
     
     def advance_a_grid_or_data(self, grid_or_data_name):
+        advance_by = self.keep_time_size-2
         if grid_or_data_name=='grid':
-            advance_by = self.keep_time_size-1
             self.full_time_arr.mask[self.lowest_kept_time_index : self.lowest_kept_time_index + advance_by] = True
-            self.full_time_arr.mask[self.lowest_kept_time_index + advance_by : self.lowest_kept_time_index + advance_by + self.keep_time_size] = False
+            self.full_time_arr.mask[self.lowest_kept_time_index + advance_by: self.lowest_kept_time_index + advance_by + self.keep_time_size] = False
             self.grid[0] = self.full_time_arr[~self.full_time_arr.mask]
             self.lowest_kept_time_index += advance_by
         else:
             data_grid = getattr(self, grid_or_data_name)
 
-            spacetime_dim = self.grid_dim
+            spacetime_dim = self.spacetime_dim
             space_dim = spacetime_dim - 1
 
-            last_time_slice_index_tuple = (..., -1, *[0]*space_dim)
-            first_time_slice_index_tuple = (..., 0, *[0]*space_dim)
-            middle_time_slice_index_tuple = (..., np.s_[1:], *[0]*space_dim)
+            last_time_slice_index_tuple = (..., np.s_[-1:-(advance_by+1):-1], *[0]*space_dim)
+            first_time_slice_index_tuple = (..., np.s_[:(advance_by+1)], *[0]*space_dim)
+            middle_time_slice_index_tuple = (..., np.s_[:advance_by], *[0]*space_dim)
             
             data_grid[first_time_slice_index_tuple] = data_grid[last_time_slice_index_tuple]
-            data_grid.mask[middle_time_slice_index_tuple] = False
+            data_grid.mask[middle_time_slice_index_tuple] = True
             
             setattr(self, grid_or_data_name, data_grid)
             
@@ -435,7 +475,71 @@ class SpacetimeMesh:
     def advance(self, names_to_advance=['grid', 'deviation_grid', 'christoffel_grid']):
         for name in names_to_advance:
             self.advance_a_grid_or_data(name)
+    
+    def shift_a_grid_or_data(self, space_index, shift=None, grid_or_data_name='grid'):
+        if shift == None:
+            shift = []
+            for i in range(len(space_index)):
+                if space_index[i] <= self.lowest_kept_space_index[i]:
+                    shift.append(space_index[i] - (self.lowest_kept_space_index[i]+self.keep_space_size) + 1)
+                elif space_index[i] >= self.lowest_kept_space_index[i] + self.keep_space_size - 1:
+                    shift.append(space_index[i] - self.lowest_kept_space_index[i] - 1)
+                else:
+                    shift.append(0)
+        if grid_or_data_name=='grid':
+            for i in range(len(space_index)):
+                if shift[i]>=0:
+                    self.full_space_arrs[i].mask[self.lowest_kept_space_index[i] : self.lowest_kept_space_index[i] + shift[i]] = True
+                elif shift[i]<0:
+                    self.full_space_arrs[i].mask[self.lowest_kept_space_index[i] + self.keep_space_size-1 : self.lowest_kept_space_index[i] + self.keep_space_size -1 + shift[i] : -1] = True
+                    #self.full_space_arrs[i].mask[self.lowest_kept_space_index[i] + self.keep_space_size-1 : self.lowest_kept_space_index[i] + self.keep_space_size + shift[i] : -1]
+                
+                self.full_space_arrs[i].mask[self.lowest_kept_space_index[i] + shift[i] : self.lowest_kept_space_index[i] + self.keep_space_size + shift[i]] = False
+                #self.full_space_arrs[i].mask[self.lowest_kept_space_index[i] + shift[i] : self.lowest_kept_space_index[i] + self.keep_space_size + shift[i]]
+                
+                self.grid[i+1] = self.full_space_arrs[i][~self.full_space_arrs[i].mask]
+                self.lowest_kept_space_index[i] += shift[i]
+            return shift
+        else:
+            data_grid = getattr(self, grid_or_data_name)
 
+            spacetime_dim = self.spacetime_dim
+            space_dim = spacetime_dim - 1
+
+            edge_overlap_list_for_old = []
+            edge_overlap_list_for_new = []
+            middle_list = []
+            for subshift in shift:
+                if abs(subshift) >= self.keep_space_size:
+                    middle_list.append(np.s_[:])
+                    edge_overlap_list_for_old.append(np.s_[0:0])
+                    edge_overlap_list_for_new.append(np.s_[0:0])
+                elif subshift>0:
+                    middle_list.append(np.s_[:subshift+1])
+                    edge_overlap_list_for_old.append(np.s_[-1:-(subshift+1):-1]) #based on indexing. 1 means to shift to the right, so -1 is the indice rightmost edge
+                    edge_overlap_list_for_new.append(np.s_[0:subshift])
+                elif subshift<0:
+                    middle_list.append(np.s_[-1:subshift-1:-1])
+                    edge_overlap_list_for_old.append(np.s_[0:subshift]) #similarly, 0 is the indice of the leftmost edge 
+                    edge_overlap_list_for_new.append(np.s_[-1:-(subshift+1):-1])
+                elif subshift == 0:
+                    middle_list.append(np.s_[0:0])
+                    edge_overlap_list_for_old.append(np.s_[:]) #entire thing should be kept
+                    edge_overlap_list_for_new.append(np.s_[:])
+            
+            old_arr_slice_tuple = (..., *edge_overlap_list_for_old)
+            new_arr_slice_tuple = (..., *edge_overlap_list_for_new)
+            middle_arr_slice_tuple = (..., *middle_list)
+            
+            data_grid[new_arr_slice_tuple] = data_grid[old_arr_slice_tuple]
+            data_grid.mask[middle_arr_slice_tuple] = True
+            
+            setattr(self, grid_or_data_name, data_grid)
+
+    def shift(self, space_index, names_to_shift=['deviation_grid', 'christoffel_grid']):
+        shift = self.shift_a_grid_or_data(space_index, grid_or_data_name='grid')
+        for name in names_to_shift:
+            self.shift_a_grid_or_data(space_index, shift=shift, grid_or_data_name=name)
 
 def make_scalar(tensor_field_two_indices):
     def scalar(event):
@@ -557,6 +661,9 @@ def make_geodesic_diffy(christoffel_field_or_mesh, mode='mesh'): #important: coo
                             if not one_particle_mode:
                                 space_second_derivs[:, a-1] += double_count_factor*(- np.apply_along_axis(christoffel_comp_part_1, 1, space_indexes) * spacetime_vels[:, i] * spacetime_vels[:, j] + np.apply_along_axis(christoffel_comp_part_2, 1, space_indexes) * spacetime_vels[:, i] * spacetime_vels[:, j] * spacetime_vels[:, a])
                             else:
+                                if abs(double_count_factor*(- christoffel_comp_part_1(space_indexes) * spacetime_vels[i] * spacetime_vels[j] + christoffel_comp_part_2(space_indexes) * spacetime_vels[i] * spacetime_vels[j] * spacetime_vels[a])) > 1e2:
+                                    print(double_count_factor*(- christoffel_comp_part_1(space_indexes) * spacetime_vels[i] * spacetime_vels[j] + christoffel_comp_part_2(space_indexes) * spacetime_vels[i] * spacetime_vels[j] * spacetime_vels[a]))
+                                    double_count_factor*(- christoffel_comp_part_1(space_indexes) * spacetime_vels[i] * spacetime_vels[j] + christoffel_comp_part_2(space_indexes) * spacetime_vels[i] * spacetime_vels[j] * spacetime_vels[a])
                                 space_second_derivs[a-1] += double_count_factor*(- christoffel_comp_part_1(space_indexes) * spacetime_vels[i] * spacetime_vels[j] + christoffel_comp_part_2(space_indexes) * spacetime_vels[i] * spacetime_vels[j] * spacetime_vels[a])
                         
         return space_second_derivs
@@ -684,12 +791,14 @@ def solve_and_animate_geodesic(deviation_or_christoffel_field_or_mesh, init_pose
 
 if __name__ == '__main__':
     init_time = 0
-    end_time = 100
-    dx = .001
-    dt = .0001
+    end_time = 10
+    dx = .0001
+    dt = .01
+    keep_time_size = 3
+    keep_space_size = 10
     #dt = .00025
-    slowdown = .1 #1
-    plot_every_nth = 100 #150
+    slowdown = 1 #1
+    plot_every_nth = 15 #150
     window_one_axis = [-7,7]#[-150,150]
     
 
@@ -711,15 +820,25 @@ if __name__ == '__main__':
     ani.save('results/linearized_null_dev.mp4')
     '''
     
-    
+    '''
     deviation_field = newton_deviation
     grid, find, (dt,dx) = make_grid(time_window=[init_time, end_time], space_1d_window=window_one_axis, space_dim=2, dt=dt, dx=dx)
-    newton_spacetime = SpacetimeMesh(deviation_field, 2, grid, find)
+    newton_spacetime = SpacetimeMesh(deviation_field, 2, grid, find, keep_space_size=keep_space_size)
     init_poses = np.array([ [5,0], ], dtype='float32')
     #init_vels = np.array([ [0, .2], ], dtype='float32') 
     init_vels = np.array([ [-0.01,  0.5], ], dtype='float32')  
     ani = solve_and_animate_geodesic(newton_spacetime, init_poses, init_vels, init_time=init_time, end_time=end_time, dx=dx, dt=dt, window_one_axis=window_one_axis, slowdown=slowdown, plot_every_nth=plot_every_nth)
-    ani.save('results/lin_newton_ellipse_long.mp4')
+    ani.save('results/lin_newton_ellipse.mp4')
+    '''
+    
+    deviation_field = newton_deviation
+    grid, find, (dt,dx) = make_grid(time_window=[init_time, end_time], space_1d_window=window_one_axis, space_dim=2, dt=dt, dx=dx)
+    newton_spacetime = SpacetimeMesh(deviation_field, 2, grid, find, keep_time_size=keep_time_size, keep_space_size=keep_space_size)
+    init_poses = np.array([ [5,0], ], dtype='float32')
+    #init_vels = np.array([ [0, .2], ], dtype='float32') 
+    init_vels = np.array([ [0,  0.5], ], dtype='float32')  
+    ani = solve_and_animate_geodesic(newton_spacetime, init_poses, init_vels, init_time=init_time, end_time=end_time, dx=dx, dt=dt, window_one_axis=window_one_axis, slowdown=slowdown, plot_every_nth=plot_every_nth)
+    ani.save('results/lin_newton_circle.mp4')
     
     
     '''
